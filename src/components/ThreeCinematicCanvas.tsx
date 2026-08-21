@@ -2,6 +2,8 @@
 
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 
 export interface ThreeCanvasHandle {
   draw: (index: number) => void;
@@ -23,7 +25,6 @@ const LIQUID_CONFIG = {
 
 const RAIN_CONFIG = {
   enabled: true,
-  // CRITICAL: dense continuous field — always visible streaks across viewport
   particleCount: 3800,
   windStrength: 0.13,
   baseSpeed: 1.05,
@@ -163,26 +164,19 @@ const VERTEX_RAIN = `
           vec2 grad = vec2(r - l, tt - b);
           float edge = length(grad);
           float rnd = hashRain(vec2(offset*12.3, speed*7.1));
-          // probability: 70-85% subtle deflection, 10-20% slide, 5-10% stronger bounce
           float prob = 0.78 + rnd*0.18;
-          // distance-based: detect before contact via neighbours
           float prox = max(max(l,r), max(b,tt));
           float base = max(m*0.88 + edge*0.55, prox*0.42);
           textInfluence = base * prob * uRainIntensity * (0.65 + speed*0.45);
-          // gravity remains dominant — small deflection, mostly sideways
           vec2 n = vec2(0.0);
           if(edge > 0.02){
             n = normalize(grad + vec2(0.0, -0.85));
           } else {
-            // interior flat — push sideways randomly
             n = normalize(vec2(hashRain(vec2(offset, speed))-0.5, -0.55));
           }
-          // slide vs bounce: mostly slide along edge
-          float slideBias = 0.7;
           vec2 slideDir = normalize(vec2(n.y, -n.x));
           vec2 dir = mix(n, slideDir, 0.38);
           pos.xy += dir * textInfluence * 0.052;
-          // add micro trail bias downward
           pos.y -= textInfluence * 0.012;
         }
       }
@@ -211,7 +205,6 @@ const FRAGMENT_RAIN = `
     float tip = smoothstep(-1.0, -0.18, p.y) * smoothstep(1.0, 0.16, p.y);
     a *= tip * 1.22;
     a *= vAlpha;
-    // micro trail fade over text center
     a *= 1.0 - clamp(vTextInfluence*0.35, 0.0, 0.35);
     a = clamp(a, 0.0, 1.0);
     if(a < 0.012) discard;
@@ -228,7 +221,6 @@ const VERTEX_FOREGROUND = `
   varying float vAlpha;
   void main(){
     vec3 pos = position;
-    // gentle floating drift
     pos.x += sin(uTime*0.11 + drift*6.2)*0.025;
     pos.y += cos(uTime*0.08 + drift*5.1)*0.018;
     vec4 mv = modelViewMatrix * vec4(pos,1.0);
@@ -247,7 +239,6 @@ const FRAGMENT_FOREGROUND = `
     a *= vAlpha;
     a = pow(a, 1.15);
     if(a < 0.01) discard;
-    // warm bokeh leaf/particle — blurred, amber-tinted
     vec3 col = vec3(0.85, 0.78, 0.62);
     gl_FragColor = vec4(col, a*0.42);
   }
@@ -297,17 +288,14 @@ const FRAGMENT_DROPLET = `
       float sz = uDropletSizes[i];
       if(sz < 0.001) continue;
       vec2 toCenter = (uv - c) * vec2(aspect,1.0);
-      // irregular shape via noise
       float n = hash(c*12.3 + float(i)*7.1) * 0.12;
       float r = sz * (0.85 + n);
       float d = length(toCenter);
       float m = 1.0 - smoothstep(r*0.82, r, d);
       if(m > 0.001){
-        // refraction: pull uv toward center
         float refr = m * uDropletIntensity * 0.012;
         refractedUV += normalize(toCenter + vec2(0.0001)) * refr;
         mask = max(mask, m);
-        // specular highlight top
         vec2 hlPos = c + vec2(0.006, 0.012) * (0.7 + sz*2.0);
         float hd = length((uv - hlPos)*vec2(aspect,1.0));
         float hl = smoothstep(r*0.28, 0.0, hd) * m * 0.75;
@@ -318,7 +306,6 @@ const FRAGMENT_DROPLET = `
       gl_FragColor = vec4(0.0);
       return;
     }
-    // cover-fit for refraction sample
     float texAspect = uTextureSize.x/uTextureSize.y;
     float canvasAspect = uResolution.x/uResolution.y;
     vec2 cUV;
@@ -330,13 +317,9 @@ const FRAGMENT_DROPLET = `
       cUV = vec2(refractedUV.x, refractedUV.y*sc + (1.0-sc)*0.5);
     }
     vec3 col = texture2D(uTexture, cUV).rgb;
-    // edge fresnel
-    float edge = pow(mask, 1.4);
     col = mix(col, vec3(1.0), highlight*0.55);
-    // slight bright rim
     col += vec3(0.12,0.14,0.16) * pow(mask, 8.0) * 0.35;
     float a = mask * 0.96 * uDropletIntensity;
-    // fade with overall intensity
     gl_FragColor = vec4(col, a);
   }
 `;
@@ -359,16 +342,7 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       ref,
       () => ({
         draw(index: number) {
-          // handled via materialRef in effect — store index to pick up next frame
           lastIndexRef.current = index;
-          // actual texture swap happens inside effect via framesRef
-          const mat = (materialRef as any).current as THREE.ShaderMaterial | null;
-          const tex = (textureRef as any).current as THREE.Texture | null;
-          if (!mat || !tex || !framesRef.current[index]) {
-            // fallback handled in render loop via lastIndexRef check
-          } else {
-            // quick path if already correct
-          }
         },
       }),
       []
@@ -379,7 +353,6 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
     const rainMaterialRef = useRef<THREE.ShaderMaterial | null>(null);
     const mistMaterialRef = useRef<THREE.ShaderMaterial | null>(null);
     const dropletMaterialRef = useRef<THREE.ShaderMaterial | null>(null);
-    const dropletCentersRef = useRef<THREE.Vector2[]>([]);
 
     useEffect(() => {
       const container = containerRef.current;
@@ -393,7 +366,7 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
         window.matchMedia("(pointer: coarse)").matches;
       const disableRain = prefersReduced || isCoarse;
 
-      // --- text collision mask (offscreen canvas -> texture) ---
+      // --- text collision mask ---
       const maskCanvas = document.createElement("canvas");
       const maskW = 512;
       const maskH = Math.round(512 * window.innerHeight / Math.max(1, window.innerWidth));
@@ -405,8 +378,6 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       maskTexture.magFilter = THREE.LinearFilter;
       maskTexture.wrapS = THREE.ClampToEdgeWrapping;
       maskTexture.wrapT = THREE.ClampToEdgeWrapping;
-      maskTexture.needsUpdate = false;
-
       const getEffectiveOpacity = (el: Element): number => {
         let o = 1;
         let cur: Element | null = el;
@@ -419,7 +390,6 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
         }
         return o;
       };
-
       const updateTextMask = () => {
         if (!RAIN_TEXT_CONFIG.enabled) return;
         const w = maskCanvas.width, h = maskCanvas.height;
@@ -476,6 +446,10 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
       renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.72;
       renderer.domElement.style.width = "100%";
       renderer.domElement.style.height = "100%";
       renderer.domElement.style.display = "block";
@@ -483,10 +457,52 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       rendererRef.current = renderer;
 
       const scene = new THREE.Scene();
-      // subtle volumetric fog for depth — distant mountains softer
       scene.fog = new THREE.FogExp2(0x0D0B09, 0.019);
       const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10);
       camera.position.z = 1;
+
+      // --- warm cinematic lights — dark base, controlled highlights ---
+      const ambient = new THREE.AmbientLight(0x1a1210, 0.18);
+      const keyLight = new THREE.DirectionalLight(0xffb85c, 1.08);
+      keyLight.position.set(2.4, 2.9, 4.2);
+      keyLight.castShadow = true;
+      keyLight.shadow.mapSize.set(1024, 1024);
+      keyLight.shadow.camera.near = 0.1;
+      keyLight.shadow.camera.far = 10;
+      keyLight.shadow.bias = -0.0005;
+      const rimLight = new THREE.DirectionalLight(0xff8a3a, 0.82);
+      rimLight.position.set(-2.8, 1.6, -2.0);
+      const fillLight = new THREE.DirectionalLight(0x6a7a8a, 0.08);
+      fillLight.position.set(-2.0, 1.2, 2.2);
+      const topLight = new THREE.PointLight(0xffc07a, 0.32, 10);
+      topLight.position.set(0, 3.0, 1.2);
+      const edgeLight = new THREE.PointLight(0xffb86a, 0.28, 6);
+      edgeLight.position.set(-1.2, 0.4, 2.2);
+      scene.add(ambient, keyLight, rimLight, fillLight, topLight, edgeLight);
+
+      // --- reflective wet ground — dark, subtle ---
+      const groundGeo = new THREE.PlaneGeometry(8, 8);
+      const groundMat = new THREE.MeshStandardMaterial({
+        color: 0x0a0a0a,
+        roughness: 0.34,
+        metalness: 0.32,
+        envMapIntensity: 0.38,
+      });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -1.18;
+      ground.position.z = -0.05;
+      ground.receiveShadow = true;
+      ground.visible = false;
+      scene.add(ground);
+
+      // --- PMREM environment ---
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      try {
+        const roomEnv = new RoomEnvironment();
+        const envMap = pmrem.fromScene(roomEnv as unknown as THREE.Scene, 0.04).texture;
+        scene.environment = envMap;
+      } catch {}
 
       // --- cinematic plane ---
       const geo = new THREE.PlaneGeometry(2, 2);
@@ -547,14 +563,11 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       const alphas = new Float32Array(rainCount);
       const speeds = new Float32Array(rainCount);
       const offsets = new Float32Array(rainCount);
-
       for (let i = 0; i < rainCount; i++) {
-        const depth = Math.random(); // 0 bg small -> 1 fg large
-        // distribute to match spec foreground 500 / mid 1200 / bg 800 approx via size
+        const depth = Math.random();
         positions[i * 3] = (Math.random() * 2.4 - 1.2) * 1.15;
         positions[i * 3 + 1] = Math.random() * 2.6 - 1.3;
         positions[i * 3 + 2] = 0;
-        // size: bg ~1.2, fg ~5.2
         sizes[i] = THREE.MathUtils.lerp(1.4, 5.4, Math.pow(depth, 1.2)) + (Math.random() - 0.5) * 0.6;
         alphas[i] = THREE.MathUtils.lerp(0.06, 0.34, depth) * (0.7 + Math.random() * 0.6);
         speeds[i] = THREE.MathUtils.lerp(0.42, 1.18, depth) * RAIN_CONFIG.baseSpeed;
@@ -565,7 +578,6 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       rainGeo.setAttribute("alpha", new THREE.BufferAttribute(alphas, 1));
       rainGeo.setAttribute("speed", new THREE.BufferAttribute(speeds, 1));
       rainGeo.setAttribute("offset", new THREE.BufferAttribute(offsets, 1));
-
       const rainMat = new THREE.ShaderMaterial({
         vertexShader: VERTEX_RAIN,
         fragmentShader: FRAGMENT_RAIN,
@@ -587,7 +599,7 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       rainPoints.renderOrder = 2;
       scene.add(rainPoints);
 
-      // --- foreground depth particles (near leaves / bokeh) ---
+      // --- foreground depth particles ---
       const fgCount = isCoarse ? 22 : 64;
       const fgGeo = new THREE.BufferGeometry();
       const fgPos = new Float32Array(fgCount * 3);
@@ -595,7 +607,6 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       const fgAlphas = new Float32Array(fgCount);
       const fgDrifts = new Float32Array(fgCount);
       for (let i = 0; i < fgCount; i++) {
-        // near camera — spread but keep within view, slightly beyond edges
         fgPos[i * 3] = (Math.random() * 2.2 - 1.1);
         fgPos[i * 3 + 1] = Math.random() * 2.0 - 1.0;
         fgPos[i * 3 + 2] = 0;
@@ -621,17 +632,14 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       fgPoints.renderOrder = 4;
       scene.add(fgPoints);
 
-      // --- droplets ---
+      // --- droplets (kept for future, currently disabled per rain visibility request) ---
       const dropletCenters: THREE.Vector2[] = [];
       const dropletSizes: number[] = [];
-      const dropletSpeeds: number[] = [];
       for (let i = 0; i < 14; i++) {
         dropletCenters.push(new THREE.Vector2(Math.random() * 0.9 + 0.05, Math.random() * 0.85 + 0.08));
         const sz = i < 2 ? 0.038 + Math.random() * 0.02 : 0.012 + Math.random() * 0.018;
         dropletSizes.push(sz);
-        dropletSpeeds.push(0.00015 + Math.random() * 0.00035);
       }
-      dropletCentersRef.current = dropletCenters;
 
       const dropletMat = new THREE.ShaderMaterial({
         vertexShader: VERTEX_DROPLET,
@@ -654,6 +662,162 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       dropletMesh.frustumCulled = false;
       dropletMesh.renderOrder = 3;
       scene.add(dropletMesh);
+
+      // --- perfume bottle ---
+      const bottleGroup = new THREE.Group();
+      bottleGroup.visible = false;
+      bottleGroup.position.set(0, 0, 0.6);
+      bottleGroup.scale.setScalar(0.85);
+      scene.add(bottleGroup);
+      const mixers: THREE.AnimationMixer[] = [];
+      let bottleLoaded = false;
+      // drag state for interactive rotation
+      let dragRot = 0;
+      let targetDragRot = 0;
+      let isDragging = false;
+      let hoverRotY = 0, hoverRotX = 0, hoverPosX = 0, hoverPosY = 0, hoverPosZ = 0;
+
+      const loader = new GLTFLoader();
+      // draco not needed unless glb is draco compressed — try without first
+      loader.load(
+        "/perfume-bottle.glb",
+        (gltf) => {
+          const bottle = gltf.scene;
+          // center model
+          const box = new THREE.Box3().setFromObject(bottle);
+          const center = box.getCenter(new THREE.Vector3());
+          bottle.position.sub(center);
+          const size = box.getSize(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.y, size.z);
+          const baseScale = maxDim > 0 ? 1.12 / maxDim : 1;
+          // slimmer width + taller height
+          bottle.scale.set(baseScale * 0.82, baseScale * 1.22, baseScale * 0.82);
+          // inspect & enhance materials
+          bottle.traverse((child) => {
+            const mesh = child as THREE.Mesh;
+            if (!(mesh as any).isMesh) return;
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            let mat = mesh.material as THREE.Material;
+            if (Array.isArray(mat)) mat = mat[0] as THREE.Material;
+            const m = mat as any;
+            const name = ((m && m.name) || mesh.name || "").toLowerCase();
+            const isGlass = name.includes("glass") || name.includes("bottle") || name.includes("flacon") || (m && m.transparent) || (m && m.transmission && m.transmission > 0);
+            const isMetal = name.includes("cap") || name.includes("metal") || name.includes("gold") || (m && m.metalness > 0.5);
+            try {
+              if (isGlass) {
+                // glass — dark warm base, controlled shine
+                const baseCol = m.color ? m.color.clone() : new THREE.Color(0xffffff);
+                // deep warm tint — not white
+                baseCol.multiplyScalar(0.38);
+                // add warm amber bias
+                baseCol.lerp(new THREE.Color(0x3a2012), 0.35);
+                const phys = new THREE.MeshPhysicalMaterial({
+                  map: m.map || null,
+                  normalMap: m.normalMap || null,
+                  roughnessMap: m.roughnessMap || null,
+                  metalnessMap: m.metalnessMap || null,
+                  color: baseCol,
+                  roughness: 0.16,
+                  metalness: 0,
+                  transmission: 0.62,
+                  thickness: 0.28,
+                  ior: 1.45,
+                  clearcoat: 0.65,
+                  clearcoatRoughness: 0.14,
+                  sheen: 0.85,
+                  sheenColor: new THREE.Color(0xffb86a),
+                  sheenRoughness: 0.32,
+                  transparent: true,
+                  opacity: 0.94,
+                  side: THREE.DoubleSide,
+                  envMapIntensity: 0.48,
+                });
+                if (m.roughnessMap) (phys as any).roughnessMap = m.roughnessMap;
+                if (m.normalMap) (phys as any).normalMap = m.normalMap;
+                (phys as any).attenuationColor = new THREE.Color(0x2a150a);
+                (phys as any).attenuationDistance = 0.42;
+                mesh.material = phys;
+              } else if (isMetal) {
+                // serpent/metal — dark bronze, warm gold reflections
+                const baseMetal = m.color ? m.color.clone() : new THREE.Color(0xd6b27a);
+                baseMetal.multiplyScalar(0.52);
+                baseMetal.lerp(new THREE.Color(0x4a2d12), 0.45);
+                const phys = new THREE.MeshPhysicalMaterial({
+                  map: m.map || null,
+                  color: baseMetal,
+                  metalness: 0.88,
+                  roughness: 0.38,
+                  clearcoat: 0.45,
+                  clearcoatRoughness: 0.28,
+                  sheen: 0.35,
+                  sheenColor: new THREE.Color(0xffc07a),
+                  envMapIntensity: 0.62,
+                });
+                mesh.material = phys;
+              } else if (m && m.isMeshStandardMaterial) {
+                m.roughness = Math.min(0.72, Math.max(m.roughness, 0.55));
+                (m as any).envMapIntensity = 0.32;
+                if ((m as any).color) (m as any).color.multiplyScalar(0.82);
+                m.needsUpdate = true;
+              }
+            } catch {}
+          });
+          bottleGroup.add(bottle);
+          bottleLoaded = true;
+          bottleGroup.visible = true;
+          if (gltf.animations && gltf.animations.length) {
+            const mixer = new THREE.AnimationMixer(bottle);
+            gltf.animations.forEach((clip) => mixer.clipAction(clip).play());
+            mixers.push(mixer);
+          }
+        },
+        undefined,
+        (err) => {
+          console.error("perfume-bottle.glb load failed", err);
+          // fallback: dark warm, controlled shine
+          const phGeo = new THREE.CylinderGeometry(0.22, 0.26, 1.08, 32);
+          const phMat = new THREE.MeshPhysicalMaterial({
+            color: 0x2a1f1a,
+            transmission: 0.62,
+            thickness: 0.28,
+            roughness: 0.16,
+            metalness: 0,
+            clearcoat: 0.65,
+            clearcoatRoughness: 0.14,
+            sheen: 0.85,
+            sheenColor: new THREE.Color(0xffb86a),
+            sheenRoughness: 0.32,
+            transparent: true,
+            opacity: 0.92,
+            side: THREE.DoubleSide,
+            envMapIntensity: 0.48,
+          });
+          (phMat as any).attenuationColor = new THREE.Color(0x2a150a);
+          (phMat as any).attenuationDistance = 0.42;
+          (phMat as any).attenuationColor = new THREE.Color(0x1a120f);
+          (phMat as any).attenuationDistance = 0.55;
+          const capGeo = new THREE.CylinderGeometry(0.15, 0.15, 0.16, 32);
+          const capMat = new THREE.MeshPhysicalMaterial({
+            color: 0xd6b27a,
+            metalness: 0.96,
+            roughness: 0.14,
+            clearcoat: 1.0,
+            clearcoatRoughness: 0.12,
+            sheen: 0.6,
+            envMapIntensity: 1.85,
+          });
+          const body = new THREE.Mesh(phGeo, phMat);
+          const cap = new THREE.Mesh(capGeo, capMat);
+          cap.position.y = 0.56;
+          body.castShadow = true; cap.castShadow = true;
+          const fallback = new THREE.Group();
+          fallback.add(body, cap);
+          bottleGroup.add(fallback);
+          bottleLoaded = true;
+          bottleGroup.visible = true;
+        }
+      );
 
       const resize = () => {
         const w = container.clientWidth;
@@ -684,6 +848,29 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       window.addEventListener("mousemove", onMove, { passive: true });
       window.addEventListener("mouseleave", onLeave);
 
+      // bottle drag rotation
+      const onPointerDown = (e: PointerEvent) => {
+        if (!bottleGroup.visible) return;
+        isDragging = true;
+        try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch {}
+        renderer.domElement.style.cursor = "grabbing";
+        container.style.cursor = "grabbing";
+      };
+      const onPointerMoveDrag = (e: PointerEvent) => {
+        if (!isDragging) return;
+        targetDragRot += e.movementX * 0.009;
+      };
+      const onPointerUp = () => {
+        isDragging = false;
+        renderer.domElement.style.cursor = "grab";
+        container.style.cursor = "grab";
+      };
+      container.addEventListener("pointerdown", onPointerDown);
+      window.addEventListener("pointermove", onPointerMoveDrag);
+      window.addEventListener("pointerup", onPointerUp);
+      container.style.cursor = "grab";
+      (container.style as any).touchAction = "none";
+
       targetMouseRef.current.set(0.5, 0.5);
       smoothMouseRef.current.set(0.5, 0.5);
 
@@ -707,20 +894,17 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
         const relaxK = 1 - Math.pow(LIQUID_CONFIG.relaxation, dt * 60);
         intensityRef.current += (targetIntensityRef.current - intensityRef.current) * (1 - relaxK);
 
-        // --- 3D parallax (mouse + idle + scroll) ---
+        // 3D parallax
         const idleX = Math.sin(t * 0.07) * 0.006;
         const idleY = Math.cos(t * 0.05) * 0.004;
         const parallaxScale = isCoarse ? 0.32 : 1;
         const parallaxX = (smoothMouseRef.current.x - 0.5) * 0.11 * parallaxScale + idleX;
         const parallaxY = (0.5 - smoothMouseRef.current.y) * 0.08 * parallaxScale + idleY;
 
-        // scroll progress → rain/mist/droplet stage
+        // scroll progress
         let prog = 0;
         if (scrollProgressRef?.current !== undefined) prog = scrollProgressRef.current;
-        else {
-          // fallback: estimate from lastIndexRef if no scrollProgressRef
-          prog = lastIndexRef.current >= 0 ? lastIndexRef.current / 191 : 0;
-        }
+        else prog = lastIndexRef.current >= 0 ? lastIndexRef.current / 191 : 0;
         const rainIntensity = lerpStage(prog, "intensity");
         const mistIntensity = lerpStage(prog, "mist");
         const dropletIntensity = lerpStage(prog, "droplets");
@@ -729,7 +913,6 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
         const finalMist = disableRain ? 0 : mistIntensity;
         const finalDroplets = disableRain ? 0 : dropletIntensity;
 
-        // update cinematic texture if frame changed
         const idx = lastIndexRef.current;
         if (idx !== lastFrameIdx) {
           lastFrameIdx = idx;
@@ -754,7 +937,7 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
           }
         }
 
-        // 3D parallax — cinematic depth layers (foreground moves most)
+        // parallax layers
         const dolly = prog * 0.045;
         cinematicMesh.position.x = parallaxX * 0.32;
         cinematicMesh.position.y = parallaxY * 0.22;
@@ -768,29 +951,72 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
         if (scene.fog) (scene.fog as THREE.FogExp2).density = 0.016 + prog * 0.009;
         (fgPoints.material as THREE.ShaderMaterial).uniforms.uTime.value = t;
 
-        // uniforms — cinematic liquid
         cinematicMat.uniforms.uMouse.value.copy(smoothMouseRef.current);
         cinematicMat.uniforms.uPrevMouse.value.set(prevX, prevY);
         cinematicMat.uniforms.uTime.value = t;
         cinematicMat.uniforms.uIntensity.value = intensityRef.current;
 
-        // mist
         mistMat.uniforms.uTime.value = t;
         mistMat.uniforms.uMist.value = finalMist * RAIN_CONFIG.mistStrength * 6.5;
 
-        // update text collision mask for rain
         updateTextMask();
         rainMat.uniforms.uTextMask.value = maskTexture;
         rainMat.uniforms.uTextEnabled.value = RAIN_TEXT_CONFIG.enabled && finalRainIntensity > 0.02 ? 1 : 0;
 
-        // rain
         rainMat.uniforms.uTime.value = t;
-        rainMat.uniforms.uRainIntensity.value = finalRainIntensity;
+        rainMat.uniforms.uRainIntensity.value = finalRainIntensity * (1 - (bottleGroup.visible ? Math.min(1, Math.max(0, (prog - 0.55) / 0.25)) * 0.32 : 0));
         rainMat.uniforms.uWind.value = RAIN_CONFIG.windStrength;
 
-        // droplets disabled per user — no floatingLens droplets
         dropletMesh.visible = false;
         dropletMat.uniforms.uDropletIntensity.value = 0;
+
+        // --- bottle reveal (centered) ---
+        if (bottleLoaded || bottleGroup.children.length > 0) {
+          const bp = Math.max(0, Math.min(1, (prog - 0.54) / 0.31));
+          const eased = bp < 1 ? 1 - Math.pow(1 - bp, 3) : 1;
+          const show = prog >= 0.52 && prog <= 0.96;
+          bottleGroup.visible = show && eased > 0.01;
+          ground.visible = show && eased > 0.12;
+          // drag + mouse-responsive 3D hover — sublte, inertia
+          dragRot += (targetDragRot - dragRot) * (1 - Math.pow(0.88, dt * 60));
+          const mouseNormX = (smoothMouseRef.current.x - 0.5) * 2;
+          const mouseNormY = (smoothMouseRef.current.y - 0.5) * 2;
+          const targetHoverRotY = THREE.MathUtils.clamp(mouseNormX * 0.11, -0.14, 0.14);
+          const targetHoverRotX = THREE.MathUtils.clamp(-mouseNormY * 0.07, -0.087, 0.087);
+          const targetHoverPosX = THREE.MathUtils.clamp(mouseNormX * 0.035, -0.035, 0.035);
+          const targetHoverPosY = THREE.MathUtils.clamp(mouseNormY * 0.022, -0.022, 0.022);
+          const targetHoverPosZ = -(Math.abs(mouseNormX) * 0.012 + Math.abs(mouseNormY) * 0.008);
+          const hoverLerp = 1 - Math.pow(0.85, dt * 60);
+          const posLerp = 1 - Math.pow(0.88, dt * 60);
+          const hoverScale = isCoarse ? 0 : 1;
+          hoverRotY += (targetHoverRotY * hoverScale - hoverRotY) * hoverLerp;
+          hoverRotX += (targetHoverRotX * hoverScale - hoverRotX) * hoverLerp;
+          hoverPosX += (targetHoverPosX * hoverScale - hoverPosX) * posLerp;
+          hoverPosY += (targetHoverPosY * hoverScale - hoverPosY) * posLerp;
+          hoverPosZ += (targetHoverPosZ * hoverScale - hoverPosZ) * posLerp;
+          const baseRotY = eased * 0.32 + Math.sin(t * 0.11) * 0.018;
+          const baseRotX = Math.sin(t * 0.08) * 0.012;
+          bottleGroup.position.x = hoverPosX;
+          bottleGroup.position.y = THREE.MathUtils.lerp(-0.85, 0.02, eased) + hoverPosY;
+          bottleGroup.position.z = THREE.MathUtils.lerp(0.85, 0.32, eased) + hoverPosZ;
+          bottleGroup.scale.setScalar(THREE.MathUtils.lerp(0.78, 1.0, eased) * (1 + Math.sin(t * 0.6) * 0.005 * eased));
+          bottleGroup.rotation.y = baseRotY + hoverRotY + dragRot;
+          bottleGroup.rotation.x = baseRotX + hoverRotX;
+          bottleGroup.traverse((c) => {
+            const m = (c as THREE.Mesh).material as any;
+            if (m && "opacity" in m) {
+              m.transparent = true;
+              m.opacity = THREE.MathUtils.clamp(eased, 0, 1);
+            }
+          });
+          // moving studio lights — dark warm, controlled shine
+          keyLight.position.x = 2.8 + Math.sin(t * 0.09) * 0.55;
+          keyLight.position.y = 3.2 + Math.cos(t * 0.07) * 0.22;
+          rimLight.intensity = 0.82 + Math.sin(t * 0.12) * 0.10;
+          edgeLight.intensity = 0.28 + Math.sin(t * 0.15) * 0.07;
+          edgeLight.position.x = -1.2 + Math.sin(t * 0.08) * 0.28;
+          mixers.forEach((mx) => mx.update(dt));
+        }
 
         renderer.render(scene, camera);
       };
@@ -800,6 +1026,9 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
         window.removeEventListener("resize", resize);
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseleave", onLeave);
+        container.removeEventListener("pointerdown", onPointerDown);
+        window.removeEventListener("pointermove", onPointerMoveDrag);
+        window.removeEventListener("pointerup", onPointerUp);
         if (rafRef.current) cancelAnimationFrame(rafRef.current);
         geo.dispose();
         rainGeo.dispose();
@@ -810,6 +1039,7 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
         (fgPoints.material as THREE.ShaderMaterial).dispose();
         dropletMat.dispose();
         tex.dispose();
+        pmrem.dispose();
         renderer.dispose();
         if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement);
       };
