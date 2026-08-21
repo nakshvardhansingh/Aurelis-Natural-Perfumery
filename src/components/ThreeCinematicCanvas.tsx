@@ -220,6 +220,39 @@ const FRAGMENT_RAIN = `
   }
 `;
 
+const VERTEX_FOREGROUND = `
+  attribute float size;
+  attribute float alpha;
+  attribute float drift;
+  uniform float uTime;
+  varying float vAlpha;
+  void main(){
+    vec3 pos = position;
+    // gentle floating drift
+    pos.x += sin(uTime*0.11 + drift*6.2)*0.025;
+    pos.y += cos(uTime*0.08 + drift*5.1)*0.018;
+    vec4 mv = modelViewMatrix * vec4(pos,1.0);
+    gl_Position = projectionMatrix * mv;
+    gl_PointSize = size;
+    vAlpha = alpha;
+  }
+`;
+const FRAGMENT_FOREGROUND = `
+  precision highp float;
+  varying float vAlpha;
+  void main(){
+    vec2 p = gl_PointCoord*2.0-1.0;
+    float d = length(p);
+    float a = 1.0 - smoothstep(0.0, 1.0, d);
+    a *= vAlpha;
+    a = pow(a, 1.15);
+    if(a < 0.01) discard;
+    // warm bokeh leaf/particle — blurred, amber-tinted
+    vec3 col = vec3(0.85, 0.78, 0.62);
+    gl_FragColor = vec4(col, a*0.42);
+  }
+`;
+
 const VERTEX_MIST = `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`;
 const FRAGMENT_MIST = `
   precision highp float;
@@ -450,6 +483,8 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       rendererRef.current = renderer;
 
       const scene = new THREE.Scene();
+      // subtle volumetric fog for depth — distant mountains softer
+      scene.fog = new THREE.FogExp2(0x0D0B09, 0.019);
       const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10);
       camera.position.z = 1;
 
@@ -552,6 +587,40 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
       rainPoints.renderOrder = 2;
       scene.add(rainPoints);
 
+      // --- foreground depth particles (near leaves / bokeh) ---
+      const fgCount = isCoarse ? 22 : 64;
+      const fgGeo = new THREE.BufferGeometry();
+      const fgPos = new Float32Array(fgCount * 3);
+      const fgSizes = new Float32Array(fgCount);
+      const fgAlphas = new Float32Array(fgCount);
+      const fgDrifts = new Float32Array(fgCount);
+      for (let i = 0; i < fgCount; i++) {
+        // near camera — spread but keep within view, slightly beyond edges
+        fgPos[i * 3] = (Math.random() * 2.2 - 1.1);
+        fgPos[i * 3 + 1] = Math.random() * 2.0 - 1.0;
+        fgPos[i * 3 + 2] = 0;
+        const d = Math.random();
+        fgSizes[i] = THREE.MathUtils.lerp(7.0, 14.0, d) * (0.7 + Math.random() * 0.6);
+        fgAlphas[i] = THREE.MathUtils.lerp(0.04, 0.16, d);
+        fgDrifts[i] = Math.random() * 10;
+      }
+      fgGeo.setAttribute("position", new THREE.BufferAttribute(fgPos, 3));
+      fgGeo.setAttribute("size", new THREE.BufferAttribute(fgSizes, 1));
+      fgGeo.setAttribute("alpha", new THREE.BufferAttribute(fgAlphas, 1));
+      fgGeo.setAttribute("drift", new THREE.BufferAttribute(fgDrifts, 1));
+      const fgMat = new THREE.ShaderMaterial({
+        vertexShader: VERTEX_FOREGROUND,
+        fragmentShader: FRAGMENT_FOREGROUND,
+        uniforms: { uTime: { value: 0 } },
+        transparent: true,
+        depthWrite: false,
+        depthTest: false,
+      });
+      const fgPoints = new THREE.Points(fgGeo, fgMat);
+      fgPoints.frustumCulled = false;
+      fgPoints.renderOrder = 4;
+      scene.add(fgPoints);
+
       // --- droplets ---
       const dropletCenters: THREE.Vector2[] = [];
       const dropletSizes: number[] = [];
@@ -638,6 +707,13 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
         const relaxK = 1 - Math.pow(LIQUID_CONFIG.relaxation, dt * 60);
         intensityRef.current += (targetIntensityRef.current - intensityRef.current) * (1 - relaxK);
 
+        // --- 3D parallax (mouse + idle + scroll) ---
+        const idleX = Math.sin(t * 0.07) * 0.006;
+        const idleY = Math.cos(t * 0.05) * 0.004;
+        const parallaxScale = isCoarse ? 0.32 : 1;
+        const parallaxX = (smoothMouseRef.current.x - 0.5) * 0.11 * parallaxScale + idleX;
+        const parallaxY = (0.5 - smoothMouseRef.current.y) * 0.08 * parallaxScale + idleY;
+
         // scroll progress → rain/mist/droplet stage
         let prog = 0;
         if (scrollProgressRef?.current !== undefined) prog = scrollProgressRef.current;
@@ -678,6 +754,20 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
           }
         }
 
+        // 3D parallax — cinematic depth layers (foreground moves most)
+        const dolly = prog * 0.045;
+        cinematicMesh.position.x = parallaxX * 0.32;
+        cinematicMesh.position.y = parallaxY * 0.22;
+        cinematicMesh.scale.set(1 + dolly, 1 + dolly, 1);
+        mistMesh.position.x = parallaxX * 0.55;
+        mistMesh.position.y = parallaxY * 0.38;
+        rainPoints.position.x = parallaxX * 0.88;
+        rainPoints.position.y = parallaxY * 0.62;
+        fgPoints.position.x = parallaxX * 1.38;
+        fgPoints.position.y = parallaxY * 0.95;
+        if (scene.fog) (scene.fog as THREE.FogExp2).density = 0.016 + prog * 0.009;
+        (fgPoints.material as THREE.ShaderMaterial).uniforms.uTime.value = t;
+
         // uniforms — cinematic liquid
         cinematicMat.uniforms.uMouse.value.copy(smoothMouseRef.current);
         cinematicMat.uniforms.uPrevMouse.value.set(prevX, prevY);
@@ -713,9 +803,11 @@ const ThreeCinematicCanvas = forwardRef<ThreeCanvasHandle, ThreeCanvasProps>(
         if (rafRef.current) cancelAnimationFrame(rafRef.current);
         geo.dispose();
         rainGeo.dispose();
+        fgGeo.dispose();
         cinematicMat.dispose();
         mistMat.dispose();
         rainMat.dispose();
+        (fgPoints.material as THREE.ShaderMaterial).dispose();
         dropletMat.dispose();
         tex.dispose();
         renderer.dispose();
