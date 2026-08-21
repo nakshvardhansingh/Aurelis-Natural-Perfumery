@@ -10,8 +10,15 @@ import ScrollIndicator from "./ScrollIndicator";
 import BotanicalOverlay from "./BotanicalOverlay";
 import EssencePanel from "./EssencePanel";
 import LoadingScreen from "./LoadingScreen";
-import { CHAPTERS, FRAMES, HERO_FADE_END, OUTRO_START, SEQUENCE_VIEWPORTS } from "@/lib/config";
-import { loadFrames } from "@/lib/frameLoader";
+import {
+  CHAPTERS,
+  FRAMES,
+  HERO_FADE_END,
+  INITIAL_PRELOAD_COUNT,
+  OUTRO_START,
+  SEQUENCE_VIEWPORTS,
+} from "@/lib/config";
+import { loadInitialFrames, loadRemainingFrames } from "@/lib/frameLoader";
 
 function clamp(v: number, min: number, max: number) {
   return Math.min(max, Math.max(min, v));
@@ -24,10 +31,14 @@ function smoothstep(a: number, b: number, t: number) {
 }
 
 export default function CinematicExperience() {
-  const [frames, setFrames] = useState<(HTMLImageElement | null)[]>([]);
   const [loadProgress, setLoadProgress] = useState(0);
   const [phase, setPhase] = useState<"loading" | "ready">("loading");
   const [leaving, setLeaving] = useState(false);
+
+  // Mutable frame cache — fills progressively without React re-renders.
+  const framesRef = useRef<(HTMLImageElement | null)[]>(
+    Array.from({ length: FRAMES.count }, () => null)
+  );
 
   const containerRef = useRef<HTMLElement>(null);
   const canvasHandleRef = useRef<FrameCanvasHandle>(null);
@@ -83,21 +94,26 @@ export default function CinematicExperience() {
     let cancelled = false;
     const startTime = performance.now();
 
-    loadFrames({
+    // Only the opening 32 frames block the curtain — ~4.4 MB vs 26.5 MB.
+    // Remaining 160 frames stream in the background without any quality loss
+    // (same WebP bytes, same high smoothing on draw).
+    loadInitialFrames({
+      framesRef,
+      initialCount: INITIAL_PRELOAD_COUNT,
+      concurrency: 8,
       onProgress: (p) => {
         if (!cancelled) setLoadProgress(p);
       },
     })
-      .then((loaded) => {
+      .then(() => {
         if (cancelled) return;
-        setFrames(loaded);
-        // draw first frame once canvas is mounted with frames
+        // Ensure first frame is painted before the curtain lifts
         requestAnimationFrame(() => {
           canvasHandleRef.current?.draw(0);
         });
 
         const elapsed = performance.now() - startTime;
-        const minDisplay = 1150;
+        const minDisplay = 900; // premium pause, but not wasteful
         const wait = Math.max(0, minDisplay - elapsed);
 
         window.setTimeout(() => {
@@ -108,7 +124,12 @@ export default function CinematicExperience() {
             setPhase("ready");
             document.body.style.overflow = prevOverflow;
             lenis.start();
-          }, 920);
+
+            // Fire-and-forget: stream the rest of the sequence in the
+            // background at higher parallelism (HTTP/2 multiplexed).
+            // No decode() blocking — decode happens lazily on first draw.
+            loadRemainingFrames(framesRef, INITIAL_PRELOAD_COUNT, 10).catch(() => {});
+          }, 650);
         }, wait);
       })
       .catch(() => {
@@ -116,6 +137,7 @@ export default function CinematicExperience() {
           setPhase("ready");
           document.body.style.overflow = prevOverflow;
           lenis.start();
+          loadRemainingFrames(framesRef, INITIAL_PRELOAD_COUNT, 10).catch(() => {});
         }
       });
 
@@ -127,13 +149,6 @@ export default function CinematicExperience() {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
   }, []);
-
-  // keep canvas showing frame 0 once frames arrive and we're still loading
-  useEffect(() => {
-    if (frames.length > 0) {
-      canvasHandleRef.current?.draw(0);
-    }
-  }, [frames]);
 
   // ——— NAVIGATION ———
   const handleNavigate = useCallback((target: NavTarget) => {
@@ -192,6 +207,10 @@ export default function CinematicExperience() {
     };
     computeMetrics();
 
+    // Paint first frame immediately on ready (in case resize happened)
+    canvasHandleRef.current?.draw(0);
+    lastIdxRef.current = 0;
+
     // sample canvas for brightness (lazy)
     let sampleCanvas: HTMLCanvasElement | null = null;
     let sampleCtx: CanvasRenderingContext2D | null = null;
@@ -239,8 +258,10 @@ export default function CinematicExperience() {
         canvasHandleRef.current?.draw(idx);
         lastIdxRef.current = idx;
 
-        // brightness sampling every 4th new frame
+        // brightness sampling every 4th new frame — reads from ref,
+        // works even while background frames are still streaming in
         brightnessCounter++;
+        const frames = framesRef.current;
         if (brightnessCounter % 4 === 0 && frames[idx]) {
           try {
             const ctx = getSampleCtx();
@@ -423,7 +444,7 @@ export default function CinematicExperience() {
       window.removeEventListener("resize", onResize);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [phase, frames]);
+  }, [phase]);
 
   const seqHeight = `${SEQUENCE_VIEWPORTS * 100}vh`;
 
@@ -442,7 +463,7 @@ export default function CinematicExperience() {
         aria-label="Cinematic fragrance sequence"
       >
         <div className="sequence-sticky">
-          <FrameCanvas ref={canvasHandleRef} frames={frames} />
+          <FrameCanvas ref={canvasHandleRef} framesRef={framesRef} />
 
           <div className="overlay-warmth" aria-hidden="true" />
           <div className="overlay-vignette" aria-hidden="true" />

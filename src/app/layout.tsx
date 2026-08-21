@@ -32,6 +32,13 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" className={`${cormorant.variable} ${montserrat.variable}`}>
+      <head>
+        {/* Critical first frames — start fetching before JS hydrates */}
+        <link rel="preload" as="image" href="/frames/frame-0000.webp" fetchPriority="high" />
+        <link rel="preload" as="image" href="/frames/frame-0001.webp" fetchPriority="high" />
+        <link rel="preload" as="image" href="/frames/frame-0002.webp" fetchPriority="high" />
+        <link rel="preload" as="image" href="/frames/frame-0003.webp" />
+      </head>
       <body>{children}</body>
     </html>
   );

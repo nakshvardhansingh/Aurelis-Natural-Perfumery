@@ -41,6 +41,9 @@ export const HERO_FADE_END = 0.05;
 /** Progress at which the outro darkening begins, handing off to the final section. */
 export const OUTRO_START = 0.92;
 
+/** How many opening frames must be ready before the curtain lifts. */
+export const INITIAL_PRELOAD_COUNT = 32;
+
 /**
  * STORY CHAPTERS
  * --------------
