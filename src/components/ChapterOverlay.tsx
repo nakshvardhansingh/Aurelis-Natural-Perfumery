@@ -2,6 +2,7 @@
 
 import { RefObject } from "react";
 import { Chapter } from "@/lib/config";
+import MagneticText from "./MagneticText";
 
 interface ChapterOverlayProps {
   chapters: Chapter[];
@@ -27,9 +28,14 @@ export default function ChapterOverlay({ chapters, chapterRefs }: ChapterOverlay
               <span>05</span>
             </p>
 
-            <h2 className="chapter-title">{chapter.title}</h2>
+            <MagneticText
+              text={chapter.title}
+              as="h2"
+              className="chapter-title"
+              intensity={0.95}
+            />
 
-            <p className="chapter-desc">{chapter.description}</p>
+            <p className="chapter-desc fx-elastic">{chapter.description}</p>
           </div>
         </div>
       ))}

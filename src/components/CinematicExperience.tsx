@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Lenis from "lenis";
-import FrameCanvas, { FrameCanvasHandle } from "./FrameCanvas";
+import ThreeCinematicCanvas, { ThreeCanvasHandle } from "./ThreeCinematicCanvas";
 import Navigation, { NavTarget } from "./Navigation";
 import HeroContent from "./HeroContent";
 import ChapterOverlay from "./ChapterOverlay";
@@ -41,7 +41,7 @@ export default function CinematicExperience() {
   );
 
   const containerRef = useRef<HTMLElement>(null);
-  const canvasHandleRef = useRef<FrameCanvasHandle>(null);
+  const canvasHandleRef = useRef<ThreeCanvasHandle>(null);
   const lenisRef = useRef<Lenis | null>(null);
   const rafRef = useRef<number>(0);
   const heroRef = useRef<HTMLDivElement>(null);
@@ -463,7 +463,7 @@ export default function CinematicExperience() {
         aria-label="Cinematic fragrance sequence"
       >
         <div className="sequence-sticky">
-          <FrameCanvas ref={canvasHandleRef} framesRef={framesRef} />
+          <ThreeCinematicCanvas ref={canvasHandleRef} framesRef={framesRef} />
 
           <div className="overlay-warmth" aria-hidden="true" />
           <div className="overlay-vignette" aria-hidden="true" />

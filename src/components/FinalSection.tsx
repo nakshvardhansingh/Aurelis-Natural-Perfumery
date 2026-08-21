@@ -1,18 +1,21 @@
 "use client";
 
+import MagneticText from "./MagneticText";
+
 export default function FinalSection() {
   return (
     <section className="final" id="final">
       <div className="final-glow" aria-hidden="true" />
 
       <div className="final-inner">
-        <p className="final-kicker">AURELIS &middot; NATURAL PERFUMERY</p>
+        <p className="final-kicker fx-elastic">AURELIS &middot; NATURAL PERFUMERY</p>
 
-        <h2 className="final-title">
-          FROM NATURE.
-          <br />
-          DISTILLED INTO MEMORY.
-        </h2>
+        <MagneticText
+          text={"FROM NATURE.\nDISTILLED INTO MEMORY."}
+          as="h2"
+          className="final-title"
+          intensity={1.02}
+        />
 
         <span className="final-rule" aria-hidden="true">
           <i />
