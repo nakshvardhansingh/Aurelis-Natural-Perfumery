@@ -463,7 +463,7 @@ export default function CinematicExperience() {
         aria-label="Cinematic fragrance sequence"
       >
         <div className="sequence-sticky">
-          <ThreeCinematicCanvas ref={canvasHandleRef} framesRef={framesRef} />
+          <ThreeCinematicCanvas ref={canvasHandleRef} framesRef={framesRef} scrollProgressRef={smoothedRef} />
 
           <div className="overlay-warmth" aria-hidden="true" />
           <div className="overlay-vignette" aria-hidden="true" />
